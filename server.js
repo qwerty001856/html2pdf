@@ -1,13 +1,40 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
 const path = require('path');
-const os = require('os');
+const fs = require('fs');
+const { install, computeExecutablePath, Browser, BrowserPlatform } = require('@puppeteer/browsers');
 
-// Store Chrome inside the project directory so it's bundled in the deployment slug.
-// Render's build cache (/opt/render/.cache) is NOT available at runtime, but the
-// project directory is. Force-set (not ||=) because Render's env already sets this.
-process.env.PUPPETEER_CACHE_DIR = path.join(__dirname, '.cache', 'puppeteer');
+const CHROME_VERSION = '127.0.6533.88';
+const CACHE_DIR = path.join(__dirname, '.cache', 'puppeteer');
 
+// --- Ensure Chrome is installed ---
+async function ensureChrome() {
+  try {
+    // Check if Chrome already exists in our cache dir
+    const existingPath = computeExecutablePath({
+      browser: Browser.CHROME,
+      buildId: CHROME_VERSION,
+      cacheDir: CACHE_DIR,
+    });
+    if (fs.existsSync(existingPath)) {
+      console.log('Chrome found at:', existingPath);
+      return existingPath;
+    }
+  } catch {
+    // computeExecutablePath throws if not found — that's expected
+  }
+
+  console.log('Chrome not found. Downloading (one-time)...');
+  const result = await install({
+    browser: Browser.CHROME,
+    buildId: CHROME_VERSION,
+    cacheDir: CACHE_DIR,
+  });
+  console.log('Chrome downloaded to:', result.executablePath);
+  return result.executablePath;
+}
+
+// --- Express app ---
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -23,8 +50,14 @@ app.post('/api/generate-pdf', async (req, res) => {
 
   let browser;
   try {
+    // Set env so Puppeteer uses our cache dir for launch
+    process.env.PUPPETEER_CACHE_DIR = CACHE_DIR;
+
+    const executablePath = await ensureChrome();
+
     browser = await puppeteer.launch({
       headless: true,
+      executablePath,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
     });
 
@@ -60,6 +93,12 @@ app.post('/api/generate-pdf', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`html2pdf server running on http://localhost:${PORT}`);
+// Start server after ensuring Chrome is ready
+ensureChrome().then(() => {
+  app.listen(PORT, () => {
+    console.log(`html2pdf server running on http://localhost:${PORT}`);
+  });
+}).catch((err) => {
+  console.error('Failed to install Chrome:', err);
+  process.exit(1);
 });
